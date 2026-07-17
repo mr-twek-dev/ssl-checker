@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+BINARY_DIR="${SCRIPT_DIR}/.bin"
+BINARY_PATH="${BINARY_DIR}/go-ssl-checker-bot"
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  cat <<'HELP'
+Usage: ./go-ssl-check
+
+Starts the Telegram SSL checker bot. Set TELEGRAM_BOT_TOKEN before running:
+
+  export TELEGRAM_BOT_TOKEN="<token from BotFather>"
+  ./go-ssl-check
+
+The script builds the Go bot into .bin/go-ssl-checker-bot and then runs it.
+HELP
+  exit 0
+fi
+
+if [[ -z "${TELEGRAM_BOT_TOKEN:-}" ]]; then
+  cat >&2 <<'ERROR'
+TELEGRAM_BOT_TOKEN is not set.
+Create a bot with BotFather, then run:
+
+  export TELEGRAM_BOT_TOKEN="<token from BotFather>"
+  ./go-ssl-check
+ERROR
+  exit 1
+fi
+
+mkdir -p "${BINARY_DIR}"
+go build -o "${BINARY_PATH}" "${SCRIPT_DIR}"
+exec "${BINARY_PATH}" "$@"
