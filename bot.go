@@ -164,7 +164,7 @@ func (bot *TelegramBot) watch(ctx context.Context, chatID int64, args []string) 
 }
 
 func (bot *TelegramBot) watchLoop(ctx context.Context, chatID int64, target string, interval time.Duration) {
-	bot.runCheckAndSend(ctx, chatID, target)
+	bot.runScheduledCheckAndAlert(ctx, chatID, target)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -172,7 +172,7 @@ func (bot *TelegramBot) watchLoop(ctx context.Context, chatID int64, target stri
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			bot.runCheckAndSend(ctx, chatID, target)
+			bot.runScheduledCheckAndAlert(ctx, chatID, target)
 		}
 	}
 }
@@ -222,6 +222,23 @@ func (bot *TelegramBot) runCheckAndSend(ctx context.Context, chatID int64, targe
 	} else {
 		message = FormatResult(result)
 	}
+	bot.sendLongMessage(ctx, chatID, message)
+}
+
+func (bot *TelegramBot) runScheduledCheckAndAlert(ctx context.Context, chatID int64, target string) {
+	result, err := CheckTLSCertificate(ctx, target)
+	if err != nil {
+		bot.sendLongMessage(ctx, chatID, fmt.Sprintf("🚨 TLS alert for %s\n❌ Ошибка TLS проверки: %v", target, err))
+		return
+	}
+	if len(result.Problems) == 0 {
+		log.Printf("scheduled TLS check succeeded for %s without warnings", target)
+		return
+	}
+	bot.sendLongMessage(ctx, chatID, "🚨 TLS alert for "+target+"\n"+FormatResult(result))
+}
+
+func (bot *TelegramBot) sendLongMessage(ctx context.Context, chatID int64, message string) {
 	for _, chunk := range splitMessage(message, telegramMessageMaxSize) {
 		bot.sendMessage(ctx, chatID, chunk)
 	}
