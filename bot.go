@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,13 +21,26 @@ const (
 	defaultWatchInterval   = 24 * time.Hour
 	minimumWatchInterval   = time.Minute
 	telegramMessageMaxSize = 3900
+	defaultWatchersFile    = ".data/watchers.json"
 )
 
 type TelegramBot struct {
-	token      string
-	client     *http.Client
-	watchers   map[string]context.CancelFunc
-	watchersMu sync.Mutex
+	token        string
+	client       *http.Client
+	watchersFile string
+	watchers     map[string]watcherEntry
+	watchersMu   sync.Mutex
+}
+
+type WatchConfig struct {
+	ChatID          int64  `json:"chat_id"`
+	Target          string `json:"target"`
+	IntervalSeconds int64  `json:"interval_seconds"`
+}
+
+type watcherEntry struct {
+	Config WatchConfig
+	Cancel context.CancelFunc
 }
 
 type TelegramUpdate struct {
@@ -65,14 +80,22 @@ func main() {
 }
 
 func NewTelegramBot(token string) *TelegramBot {
+	watchersFile := os.Getenv("WATCHERS_FILE")
+	if watchersFile == "" {
+		watchersFile = defaultWatchersFile
+	}
 	return &TelegramBot{
-		token:    token,
-		client:   &http.Client{Timeout: 70 * time.Second},
-		watchers: make(map[string]context.CancelFunc),
+		token:        token,
+		client:       &http.Client{Timeout: 70 * time.Second},
+		watchersFile: watchersFile,
+		watchers:     make(map[string]watcherEntry),
 	}
 }
 
 func (bot *TelegramBot) Run(ctx context.Context) error {
+	if err := bot.restoreWatchers(); err != nil {
+		log.Printf("restore watchers failed: %v", err)
+	}
 	log.Println("ssl-checker Telegram bot started")
 	offset := 0
 	for {
@@ -150,17 +173,13 @@ func (bot *TelegramBot) watch(ctx context.Context, chatID int64, args []string) 
 		interval = minimumWatchInterval
 	}
 
-	key := watcherKey(chatID, target)
-	watchCtx, cancel := context.WithCancel(context.Background())
-	bot.watchersMu.Lock()
-	if existingCancel, ok := bot.watchers[key]; ok {
-		existingCancel()
+	config := WatchConfig{ChatID: chatID, Target: target, IntervalSeconds: int64(interval.Seconds())}
+	bot.upsertWatcher(config)
+	if err := bot.saveWatchers(); err != nil {
+		bot.sendMessage(ctx, chatID, "⚠️ Проверка добавлена, но не удалось сохранить список проверок: "+err.Error())
+		return
 	}
-	bot.watchers[key] = cancel
-	bot.watchersMu.Unlock()
-
-	go bot.watchLoop(watchCtx, chatID, target, interval)
-	bot.sendMessage(ctx, chatID, fmt.Sprintf("✅ Добавлена проверка %s каждые %d мин.", target, int(interval.Minutes())))
+	bot.sendMessage(ctx, chatID, fmt.Sprintf("✅ Добавлена проверка %s каждые %s.", target, formatInterval(interval)))
 }
 
 func (bot *TelegramBot) watchLoop(ctx context.Context, chatID int64, target string, interval time.Duration) {
@@ -184,13 +203,17 @@ func (bot *TelegramBot) unwatch(ctx context.Context, chatID int64, args []string
 	}
 	key := watcherKey(chatID, args[0])
 	bot.watchersMu.Lock()
-	cancel, ok := bot.watchers[key]
+	entry, ok := bot.watchers[key]
 	if ok {
-		cancel()
+		entry.Cancel()
 		delete(bot.watchers, key)
 	}
 	bot.watchersMu.Unlock()
 	if ok {
+		if err := bot.saveWatchers(); err != nil {
+			bot.sendMessage(ctx, chatID, "⚠️ Проверка удалена, но не удалось сохранить список проверок: "+err.Error())
+			return
+		}
 		bot.sendMessage(ctx, chatID, "✅ Проверка удалена.")
 	} else {
 		bot.sendMessage(ctx, chatID, "Активная проверка не найдена.")
@@ -202,11 +225,13 @@ func (bot *TelegramBot) listWatchers(ctx context.Context, chatID int64) {
 	bot.watchersMu.Lock()
 	defer bot.watchersMu.Unlock()
 	var targets []string
-	for key := range bot.watchers {
+	for key, entry := range bot.watchers {
 		if strings.HasPrefix(key, prefix) {
-			targets = append(targets, "- "+strings.TrimPrefix(key, prefix))
+			interval := time.Duration(entry.Config.IntervalSeconds) * time.Second
+			targets = append(targets, fmt.Sprintf("- %s — каждые %s", entry.Config.Target, formatInterval(interval)))
 		}
 	}
+	sort.Strings(targets)
 	if len(targets) == 0 {
 		bot.sendMessage(ctx, chatID, "Активных проверок нет.")
 		return
@@ -289,8 +314,87 @@ func (bot *TelegramBot) sendMessage(ctx context.Context, chatID int64, text stri
 	}
 }
 
+func (bot *TelegramBot) upsertWatcher(config WatchConfig) {
+	key := watcherKey(config.ChatID, config.Target)
+	watchCtx, cancel := context.WithCancel(context.Background())
+	bot.watchersMu.Lock()
+	if existing, ok := bot.watchers[key]; ok {
+		existing.Cancel()
+	}
+	bot.watchers[key] = watcherEntry{Config: config, Cancel: cancel}
+	bot.watchersMu.Unlock()
+	go bot.watchLoop(watchCtx, config.ChatID, config.Target, time.Duration(config.IntervalSeconds)*time.Second)
+}
+
+func (bot *TelegramBot) restoreWatchers() error {
+	configs, err := bot.loadWatcherConfigs()
+	if err != nil {
+		return err
+	}
+	for _, config := range configs {
+		if config.IntervalSeconds < int64(minimumWatchInterval.Seconds()) {
+			config.IntervalSeconds = int64(minimumWatchInterval.Seconds())
+		}
+		bot.upsertWatcher(config)
+	}
+	if len(configs) > 0 {
+		log.Printf("restored %d scheduled TLS checks", len(configs))
+	}
+	return nil
+}
+
+func (bot *TelegramBot) loadWatcherConfigs() ([]WatchConfig, error) {
+	data, err := os.ReadFile(bot.watchersFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var configs []WatchConfig
+	if err := json.Unmarshal(data, &configs); err != nil {
+		return nil, err
+	}
+	return configs, nil
+}
+
+func (bot *TelegramBot) saveWatchers() error {
+	bot.watchersMu.Lock()
+	configs := make([]WatchConfig, 0, len(bot.watchers))
+	for _, entry := range bot.watchers {
+		configs = append(configs, entry.Config)
+	}
+	bot.watchersMu.Unlock()
+	sort.Slice(configs, func(i, j int) bool {
+		if configs[i].ChatID == configs[j].ChatID {
+			return configs[i].Target < configs[j].Target
+		}
+		return configs[i].ChatID < configs[j].ChatID
+	})
+	if err := os.MkdirAll(filepath.Dir(bot.watchersFile), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(configs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(bot.watchersFile, append(data, '\n'), 0o600)
+}
+
 func watcherKey(chatID int64, target string) string {
 	return fmt.Sprintf("%d:%s", chatID, strings.ToLower(strings.TrimSpace(target)))
+}
+
+func formatInterval(interval time.Duration) string {
+	if interval%time.Hour == 0 {
+		hours := int(interval.Hours())
+		return fmt.Sprintf("%d ч", hours)
+	}
+	if interval%time.Minute == 0 {
+		minutes := int(interval.Minutes())
+		return fmt.Sprintf("%d мин", minutes)
+	}
+	return interval.String()
 }
 
 func splitMessage(text string, limit int) []string {

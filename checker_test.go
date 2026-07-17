@@ -65,3 +65,36 @@ func TestFormatResultContainsCertificateAndChainInformation(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveAndLoadWatcherConfigs(t *testing.T) {
+	bot := NewTelegramBot("token")
+	bot.watchersFile = t.TempDir() + "/watchers.json"
+	bot.watchers[watcherKey(42, "example.com")] = watcherEntry{
+		Config: WatchConfig{ChatID: 42, Target: "example.com", IntervalSeconds: 300},
+		Cancel: func() {},
+	}
+
+	if err := bot.saveWatchers(); err != nil {
+		t.Fatalf("saveWatchers returned error: %v", err)
+	}
+
+	loaded, err := bot.loadWatcherConfigs()
+	if err != nil {
+		t.Fatalf("loadWatcherConfigs returned error: %v", err)
+	}
+	if len(loaded) != 1 {
+		t.Fatalf("loaded %d configs, want 1", len(loaded))
+	}
+	if loaded[0].ChatID != 42 || loaded[0].Target != "example.com" || loaded[0].IntervalSeconds != 300 {
+		t.Fatalf("unexpected watcher config: %+v", loaded[0])
+	}
+}
+
+func TestFormatInterval(t *testing.T) {
+	if got := formatInterval(2 * time.Hour); got != "2 ч" {
+		t.Fatalf("formatInterval(2h) = %q", got)
+	}
+	if got := formatInterval(15 * time.Minute); got != "15 мин" {
+		t.Fatalf("formatInterval(15m) = %q", got)
+	}
+}
