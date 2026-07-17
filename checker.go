@@ -7,7 +7,10 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"io"
+	"math/big"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -35,16 +38,26 @@ type CertificateInfo struct {
 }
 
 type TLSCheckResult struct {
-	Host      string
-	Port      string
-	CheckedAt time.Time
-	Protocol  string
-	Cipher    string
-	PeerName  string
-	Leaf      CertificateInfo
-	Chain     []CertificateInfo
-	Verified  bool
-	Problems  []string
+	Host       string
+	Port       string
+	CheckedAt  time.Time
+	Protocol   string
+	Cipher     string
+	PeerName   string
+	Leaf       CertificateInfo
+	Chain      []CertificateInfo
+	Revocation RevocationCheck
+	Verified   bool
+	Problems   []string
+}
+
+type RevocationCheck struct {
+	Checked        bool
+	Revoked        bool
+	Source         string
+	Reason         string
+	RevocationTime time.Time
+	Message        string
 }
 
 func NormalizeTarget(rawTarget string) (string, string, error) {
@@ -100,19 +113,21 @@ func CheckTLSCertificate(ctx context.Context, rawTarget string) (*TLSCheckResult
 		chain = append(chain, certificateInfo(cert))
 	}
 	leaf := chain[0]
-	problems := certificateWarnings(host, state.PeerCertificates)
+	revocation := checkCertificateRevocation(ctx, state.PeerCertificates)
+	problems := certificateWarnings(host, state.PeerCertificates, revocation)
 
 	return &TLSCheckResult{
-		Host:      host,
-		Port:      port,
-		CheckedAt: time.Now().UTC(),
-		Protocol:  tlsVersionName(state.Version),
-		Cipher:    tls.CipherSuiteName(state.CipherSuite),
-		PeerName:  conn.RemoteAddr().String(),
-		Leaf:      leaf,
-		Chain:     chain,
-		Verified:  true,
-		Problems:  problems,
+		Host:       host,
+		Port:       port,
+		CheckedAt:  time.Now().UTC(),
+		Protocol:   tlsVersionName(state.Version),
+		Cipher:     tls.CipherSuiteName(state.CipherSuite),
+		PeerName:   conn.RemoteAddr().String(),
+		Leaf:       leaf,
+		Chain:      chain,
+		Revocation: revocation,
+		Verified:   true,
+		Problems:   problems,
 	}, nil
 }
 
@@ -137,6 +152,7 @@ func FormatResult(result *TLSCheckResult) string {
 		fmt.Sprintf("Подпись: %s", leaf.SignatureAlgorithm),
 		fmt.Sprintf("Публичный ключ: %s", leaf.PublicKeyAlgorithm),
 		fmt.Sprintf("SHA-256: %s", leaf.SHA256Fingerprint),
+		fmt.Sprintf("Отзыв: %s", formatRevocationStatus(result.Revocation)),
 		"",
 		fmt.Sprintf("🔗 Цепочка сертификатов: %d", len(result.Chain)),
 	}
@@ -184,7 +200,7 @@ func certificateInfo(cert *x509.Certificate) CertificateInfo {
 	}
 }
 
-func certificateWarnings(host string, certs []*x509.Certificate) []string {
+func certificateWarnings(host string, certs []*x509.Certificate, revocation RevocationCheck) []string {
 	var problems []string
 	leaf := certs[0]
 	now := time.Now().UTC()
@@ -201,10 +217,116 @@ func certificateWarnings(host string, certs []*x509.Certificate) []string {
 	} else if err := leaf.VerifyHostname(host); err != nil {
 		problems = append(problems, "Hostname не найден в SAN сертификата.")
 	}
+	if revocation.Revoked {
+		problems = append(problems, "Сертификат отозван: "+revocation.Message)
+	}
 	if len(certs) <= 1 {
 		problems = append(problems, "Сервер вернул только leaf-сертификат; промежуточные сертификаты не получены.")
 	}
 	return problems
+}
+
+func checkCertificateRevocation(ctx context.Context, certs []*x509.Certificate) RevocationCheck {
+	leaf := certs[0]
+	if len(leaf.CRLDistributionPoints) == 0 {
+		return RevocationCheck{Message: "CRL Distribution Points отсутствуют"}
+	}
+	var issuer *x509.Certificate
+	if len(certs) > 1 {
+		issuer = certs[1]
+	}
+	var lastMessage string
+	for _, crlURL := range leaf.CRLDistributionPoints {
+		check, err := checkCRL(ctx, leaf.SerialNumber, issuer, crlURL)
+		if err != nil {
+			lastMessage = err.Error()
+			continue
+		}
+		return check
+	}
+	if lastMessage == "" {
+		lastMessage = "не удалось проверить CRL"
+	}
+	return RevocationCheck{Source: strings.Join(leaf.CRLDistributionPoints, ", "), Message: lastMessage}
+}
+
+func checkCRL(ctx context.Context, serial *big.Int, issuer *x509.Certificate, crlURL string) (RevocationCheck, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, crlURL, nil)
+	if err != nil {
+		return RevocationCheck{}, err
+	}
+	client := http.Client{Timeout: defaultTimeout}
+	response, err := client.Do(request)
+	if err != nil {
+		return RevocationCheck{}, fmt.Errorf("CRL %s недоступен: %w", crlURL, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return RevocationCheck{}, fmt.Errorf("CRL %s вернул HTTP %s", crlURL, response.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 10*1024*1024))
+	if err != nil {
+		return RevocationCheck{}, err
+	}
+	crl, err := x509.ParseRevocationList(body)
+	if err != nil {
+		return RevocationCheck{}, fmt.Errorf("CRL %s не удалось разобрать: %w", crlURL, err)
+	}
+	if issuer != nil {
+		if err := crl.CheckSignatureFrom(issuer); err != nil {
+			return RevocationCheck{}, fmt.Errorf("подпись CRL %s недействительна: %w", crlURL, err)
+		}
+	}
+	for _, revoked := range crl.RevokedCertificateEntries {
+		if revoked.SerialNumber.Cmp(serial) == 0 {
+			return RevocationCheck{
+				Checked:        true,
+				Revoked:        true,
+				Source:         crlURL,
+				Reason:         revocationReason(revoked.ReasonCode),
+				RevocationTime: revoked.RevocationTime.UTC(),
+				Message:        fmt.Sprintf("найден в CRL %s, время отзыва %s, причина: %s", crlURL, revoked.RevocationTime.UTC().Format("2006-01-02 15:04:05 UTC"), revocationReason(revoked.ReasonCode)),
+			}, nil
+		}
+	}
+	return RevocationCheck{Checked: true, Source: crlURL, Message: "сертификат не найден в CRL"}, nil
+}
+
+func revocationReason(code int) string {
+	switch code {
+	case 0:
+		return "unspecified"
+	case 1:
+		return "keyCompromise"
+	case 2:
+		return "cACompromise"
+	case 3:
+		return "affiliationChanged"
+	case 4:
+		return "superseded"
+	case 5:
+		return "cessationOfOperation"
+	case 6:
+		return "certificateHold"
+	case 8:
+		return "removeFromCRL"
+	case 9:
+		return "privilegeWithdrawn"
+	case 10:
+		return "aACompromise"
+	default:
+		return fmt.Sprintf("unknown(%d)", code)
+	}
+}
+
+func formatRevocationStatus(check RevocationCheck) string {
+	if check.Revoked {
+		return "ОТОЗВАН — " + check.Message
+	}
+	if check.Checked {
+		return "не отозван по CRL " + check.Source
+	}
+	return "не проверен — " + check.Message
 }
 
 func tlsVersionName(version uint16) string {

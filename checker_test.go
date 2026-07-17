@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/x509"
 	"strings"
 	"testing"
 	"time"
@@ -96,5 +97,36 @@ func TestFormatInterval(t *testing.T) {
 	}
 	if got := formatInterval(15 * time.Minute); got != "15 мин" {
 		t.Fatalf("formatInterval(15m) = %q", got)
+	}
+}
+
+func TestCertificateWarningsIncludesRevokedCertificate(t *testing.T) {
+	now := time.Now().UTC()
+	cert := &x509.Certificate{
+		DNSNames:  []string{"example.com"},
+		NotBefore: now.Add(-time.Hour),
+		NotAfter:  now.Add(30 * 24 * time.Hour),
+	}
+	problems := certificateWarnings("example.com", []*x509.Certificate{cert, cert}, RevocationCheck{
+		Revoked: true,
+		Message: "найден в CRL",
+	})
+	found := false
+	for _, problem := range problems {
+		if strings.Contains(problem, "Сертификат отозван") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("revoked certificate warning not found in %+v", problems)
+	}
+}
+
+func TestFormatRevocationStatus(t *testing.T) {
+	if got := formatRevocationStatus(RevocationCheck{Checked: true, Source: "http://crl.example/ca.crl"}); !strings.Contains(got, "не отозван") {
+		t.Fatalf("expected non-revoked status, got %q", got)
+	}
+	if got := formatRevocationStatus(RevocationCheck{Revoked: true, Message: "найден в CRL"}); !strings.Contains(got, "ОТОЗВАН") {
+		t.Fatalf("expected revoked status, got %q", got)
 	}
 }
