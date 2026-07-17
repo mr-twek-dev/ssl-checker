@@ -21,7 +21,6 @@ const (
 	defaultWatchInterval   = 24 * time.Hour
 	minimumWatchInterval   = time.Minute
 	telegramMessageMaxSize = 3900
-	defaultWatchersFile    = ".data/watchers.json"
 )
 
 type TelegramBot struct {
@@ -80,14 +79,10 @@ func main() {
 }
 
 func NewTelegramBot(token string) *TelegramBot {
-	watchersFile := os.Getenv("WATCHERS_FILE")
-	if watchersFile == "" {
-		watchersFile = defaultWatchersFile
-	}
 	return &TelegramBot{
 		token:        token,
 		client:       &http.Client{Timeout: 70 * time.Second},
-		watchersFile: watchersFile,
+		watchersFile: defaultWatchersPath(),
 		watchers:     make(map[string]watcherEntry),
 	}
 }
@@ -379,6 +374,17 @@ func (bot *TelegramBot) saveWatchers() error {
 		return err
 	}
 	return os.WriteFile(bot.watchersFile, append(data, '\n'), 0o600)
+}
+
+func defaultWatchersPath() string {
+	if watchersFile := os.Getenv("WATCHERS_FILE"); watchersFile != "" {
+		return watchersFile
+	}
+	configDir, err := os.UserConfigDir()
+	if err == nil && configDir != "" {
+		return filepath.Join(configDir, "ssl-checker", "watchers.json")
+	}
+	return filepath.Join(os.TempDir(), "ssl-checker", "watchers.json")
 }
 
 func watcherKey(chatID int64, target string) string {

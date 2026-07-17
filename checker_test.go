@@ -130,3 +130,21 @@ func TestFormatRevocationStatus(t *testing.T) {
 		t.Fatalf("expected revoked status, got %q", got)
 	}
 }
+
+func TestDefaultWatchersPathUsesEnvironmentOverride(t *testing.T) {
+	t.Setenv("WATCHERS_FILE", "/tmp/custom-watchers.json")
+	if got := defaultWatchersPath(); got != "/tmp/custom-watchers.json" {
+		t.Fatalf("defaultWatchersPath() = %q", got)
+	}
+}
+
+func TestDefaultWatchersPathDoesNotUseProjectDataDirectory(t *testing.T) {
+	t.Setenv("WATCHERS_FILE", "")
+	got := defaultWatchersPath()
+	if strings.Contains(got, ".data/watchers.json") {
+		t.Fatalf("defaultWatchersPath() uses project-local .data path: %q", got)
+	}
+	if !strings.HasSuffix(got, "ssl-checker/watchers.json") {
+		t.Fatalf("defaultWatchersPath() = %q, want ssl-checker/watchers.json suffix", got)
+	}
+}
