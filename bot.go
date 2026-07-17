@@ -339,18 +339,24 @@ func (bot *TelegramBot) restoreWatchers() error {
 }
 
 func (bot *TelegramBot) loadWatcherConfigs() ([]WatchConfig, error) {
-	data, err := os.ReadFile(bot.watchersFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+	var lastErr error
+	for _, path := range watcherPathCandidates(bot.watchersFile) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			lastErr = err
+			continue
 		}
-		return nil, err
+		var configs []WatchConfig
+		if err := json.Unmarshal(data, &configs); err != nil {
+			return nil, err
+		}
+		bot.watchersFile = path
+		return configs, nil
 	}
-	var configs []WatchConfig
-	if err := json.Unmarshal(data, &configs); err != nil {
-		return nil, err
-	}
-	return configs, nil
+	return nil, lastErr
 }
 
 func (bot *TelegramBot) saveWatchers() error {
@@ -366,24 +372,71 @@ func (bot *TelegramBot) saveWatchers() error {
 		}
 		return configs[i].ChatID < configs[j].ChatID
 	})
-	if err := os.MkdirAll(filepath.Dir(bot.watchersFile), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(configs, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(bot.watchersFile, append(data, '\n'), 0o600)
+	var lastErr error
+	for _, path := range watcherPathCandidates(bot.watchersFile) {
+		if err := writeWatchersFile(path, data); err != nil {
+			lastErr = err
+			log.Printf("failed to save watchers to %s: %v", path, err)
+			continue
+		}
+		if path != bot.watchersFile {
+			log.Printf("watchers storage fallback activated: %s", path)
+		}
+		bot.watchersFile = path
+		return nil
+	}
+	return lastErr
+}
+
+func writeWatchersFile(path string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, append(data, '\n'), 0o600)
 }
 
 func defaultWatchersPath() string {
 	if watchersFile := os.Getenv("WATCHERS_FILE"); watchersFile != "" {
 		return watchersFile
 	}
+	return defaultConfigWatchersPath()
+}
+
+func watcherPathCandidates(primary string) []string {
+	paths := []string{primary}
+	if configPath := defaultConfigWatchersPath(); configPath != "" {
+		paths = append(paths, configPath)
+	}
+	paths = append(paths, fallbackWatchersPath())
+
+	seen := make(map[string]struct{}, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		unique = append(unique, path)
+	}
+	return unique
+}
+
+func defaultConfigWatchersPath() string {
 	configDir, err := os.UserConfigDir()
 	if err == nil && configDir != "" {
 		return filepath.Join(configDir, "ssl-checker", "watchers.json")
 	}
+	return fallbackWatchersPath()
+}
+
+func fallbackWatchersPath() string {
 	return filepath.Join(os.TempDir(), "ssl-checker", "watchers.json")
 }
 

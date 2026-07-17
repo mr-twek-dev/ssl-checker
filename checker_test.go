@@ -2,6 +2,8 @@ package main
 
 import (
 	"crypto/x509"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -146,5 +148,30 @@ func TestDefaultWatchersPathDoesNotUseProjectDataDirectory(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "ssl-checker/watchers.json") {
 		t.Fatalf("defaultWatchersPath() = %q, want ssl-checker/watchers.json suffix", got)
+	}
+}
+
+func TestSaveWatchersFallsBackWhenPrimaryPathIsNotWritable(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	blockingFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockingFile, []byte("block"), 0o600); err != nil {
+		t.Fatalf("failed to create blocking file: %v", err)
+	}
+
+	bot := NewTelegramBot("token")
+	bot.watchersFile = filepath.Join(blockingFile, "watchers.json")
+	bot.watchers[watcherKey(42, "example.com")] = watcherEntry{
+		Config: WatchConfig{ChatID: 42, Target: "example.com", IntervalSeconds: 300},
+		Cancel: func() {},
+	}
+
+	if err := bot.saveWatchers(); err != nil {
+		t.Fatalf("saveWatchers returned error instead of falling back: %v", err)
+	}
+	if bot.watchersFile == filepath.Join(blockingFile, "watchers.json") {
+		t.Fatalf("watchersFile did not move away from unwritable primary path")
+	}
+	if _, err := os.Stat(bot.watchersFile); err != nil {
+		t.Fatalf("fallback watchers file was not written: %v", err)
 	}
 }
