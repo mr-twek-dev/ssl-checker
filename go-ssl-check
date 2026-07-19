@@ -30,6 +30,8 @@ ERROR
   exit 1
 fi
 
+export WATCHERS_FILE="${WATCHERS_FILE:-/var/tmp/go-ssl-check/watchers.json}"
+
 mkdir -p "${BINARY_DIR}"
 go build -o "${BINARY_PATH}" "${SCRIPT_DIR}"
 exec "${BINARY_PATH}" "$@"

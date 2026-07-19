@@ -216,6 +216,9 @@ func (bot *TelegramBot) unwatch(ctx context.Context, chatID int64, args []string
 }
 
 func (bot *TelegramBot) listWatchers(ctx context.Context, chatID int64) {
+	if _, err := bot.syncWatchersFromStorage(); err != nil {
+		log.Printf("sync watchers before list failed: %v", err)
+	}
 	prefix := fmt.Sprintf("%d:", chatID)
 	bot.watchersMu.Lock()
 	defer bot.watchersMu.Unlock()
@@ -321,21 +324,46 @@ func (bot *TelegramBot) upsertWatcher(config WatchConfig) {
 	go bot.watchLoop(watchCtx, config.ChatID, config.Target, time.Duration(config.IntervalSeconds)*time.Second)
 }
 
+func (bot *TelegramBot) ensureWatcher(config WatchConfig) bool {
+	key := watcherKey(config.ChatID, config.Target)
+	bot.watchersMu.Lock()
+	if _, ok := bot.watchers[key]; ok {
+		bot.watchersMu.Unlock()
+		return false
+	}
+	watchCtx, cancel := context.WithCancel(context.Background())
+	bot.watchers[key] = watcherEntry{Config: config, Cancel: cancel}
+	bot.watchersMu.Unlock()
+	go bot.watchLoop(watchCtx, config.ChatID, config.Target, time.Duration(config.IntervalSeconds)*time.Second)
+	return true
+}
+
 func (bot *TelegramBot) restoreWatchers() error {
-	configs, err := bot.loadWatcherConfigs()
+	restored, err := bot.syncWatchersFromStorage()
 	if err != nil {
 		return err
 	}
+	if restored > 0 {
+		log.Printf("restored %d scheduled TLS checks", restored)
+	}
+	return nil
+}
+
+func (bot *TelegramBot) syncWatchersFromStorage() (int, error) {
+	configs, err := bot.loadWatcherConfigs()
+	if err != nil {
+		return 0, err
+	}
+	restored := 0
 	for _, config := range configs {
 		if config.IntervalSeconds < int64(minimumWatchInterval.Seconds()) {
 			config.IntervalSeconds = int64(minimumWatchInterval.Seconds())
 		}
-		bot.upsertWatcher(config)
+		if bot.ensureWatcher(config) {
+			restored++
+		}
 	}
-	if len(configs) > 0 {
-		log.Printf("restored %d scheduled TLS checks", len(configs))
-	}
-	return nil
+	return restored, nil
 }
 
 func (bot *TelegramBot) loadWatcherConfigs() ([]WatchConfig, error) {
