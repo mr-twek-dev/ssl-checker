@@ -339,24 +339,18 @@ func (bot *TelegramBot) restoreWatchers() error {
 }
 
 func (bot *TelegramBot) loadWatcherConfigs() ([]WatchConfig, error) {
-	var lastErr error
-	for _, path := range watcherPathCandidates(bot.watchersFile) {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			lastErr = err
-			continue
+	data, err := os.ReadFile(bot.watchersFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
 		}
-		var configs []WatchConfig
-		if err := json.Unmarshal(data, &configs); err != nil {
-			return nil, err
-		}
-		bot.watchersFile = path
-		return configs, nil
+		return nil, err
 	}
-	return nil, lastErr
+	var configs []WatchConfig
+	if err := json.Unmarshal(data, &configs); err != nil {
+		return nil, err
+	}
+	return configs, nil
 }
 
 func (bot *TelegramBot) saveWatchers() error {
@@ -376,20 +370,7 @@ func (bot *TelegramBot) saveWatchers() error {
 	if err != nil {
 		return err
 	}
-	var lastErr error
-	for _, path := range watcherPathCandidates(bot.watchersFile) {
-		if err := writeWatchersFile(path, data); err != nil {
-			lastErr = err
-			log.Printf("failed to save watchers to %s: %v", path, err)
-			continue
-		}
-		if path != bot.watchersFile {
-			log.Printf("watchers storage fallback activated: %s", path)
-		}
-		bot.watchersFile = path
-		return nil
-	}
-	return lastErr
+	return writeWatchersFile(bot.watchersFile, data)
 }
 
 func writeWatchersFile(path string, data []byte) error {
@@ -400,14 +381,40 @@ func writeWatchersFile(path string, data []byte) error {
 }
 
 func defaultWatchersPath() string {
-	if watchersFile := os.Getenv("WATCHERS_FILE"); watchersFile != "" {
-		return watchersFile
+	path, err := resolveWatchersPath()
+	if err != nil {
+		log.Printf("failed to resolve writable watchers storage, using temp fallback: %v", err)
+		return fallbackWatchersPath()
 	}
-	return defaultConfigWatchersPath()
+	return path
 }
 
-func watcherPathCandidates(primary string) []string {
-	paths := []string{primary}
+func resolveWatchersPath() (string, error) {
+	candidates := watcherPathCandidates()
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			if err := ensureWritableWatcherPath(path); err == nil {
+				return path, nil
+			}
+		}
+	}
+	var lastErr error
+	for _, path := range candidates {
+		if err := ensureWritableWatcherPath(path); err != nil {
+			lastErr = err
+			log.Printf("watchers storage candidate is not writable %s: %v", path, err)
+			continue
+		}
+		return path, nil
+	}
+	return "", lastErr
+}
+
+func watcherPathCandidates() []string {
+	paths := []string{}
+	if watchersFile := os.Getenv("WATCHERS_FILE"); watchersFile != "" {
+		paths = append(paths, watchersFile)
+	}
 	if configPath := defaultConfigWatchersPath(); configPath != "" {
 		paths = append(paths, configPath)
 	}
@@ -426,6 +433,23 @@ func watcherPathCandidates(primary string) []string {
 		unique = append(unique, path)
 	}
 	return unique
+}
+
+func ensureWritableWatcherPath(path string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	testFile, err := os.CreateTemp(dir, ".watchers-write-test-*")
+	if err != nil {
+		return err
+	}
+	testName := testFile.Name()
+	if err := testFile.Close(); err != nil {
+		_ = os.Remove(testName)
+		return err
+	}
+	return os.Remove(testName)
 }
 
 func defaultConfigWatchersPath() string {

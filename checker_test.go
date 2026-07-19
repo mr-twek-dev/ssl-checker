@@ -151,27 +151,28 @@ func TestDefaultWatchersPathDoesNotUseProjectDataDirectory(t *testing.T) {
 	}
 }
 
-func TestSaveWatchersFallsBackWhenPrimaryPathIsNotWritable(t *testing.T) {
+func TestDefaultWatchersPathFallsBackWhenEnvironmentPathIsNotWritable(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	blockingFile := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blockingFile, []byte("block"), 0o600); err != nil {
 		t.Fatalf("failed to create blocking file: %v", err)
 	}
+	badPath := filepath.Join(blockingFile, "watchers.json")
+	t.Setenv("WATCHERS_FILE", badPath)
 
 	bot := NewTelegramBot("token")
-	bot.watchersFile = filepath.Join(blockingFile, "watchers.json")
+	if bot.watchersFile == badPath {
+		t.Fatalf("watchersFile did not move away from unwritable WATCHERS_FILE")
+	}
 	bot.watchers[watcherKey(42, "example.com")] = watcherEntry{
 		Config: WatchConfig{ChatID: 42, Target: "example.com", IntervalSeconds: 300},
 		Cancel: func() {},
 	}
 
 	if err := bot.saveWatchers(); err != nil {
-		t.Fatalf("saveWatchers returned error instead of falling back: %v", err)
-	}
-	if bot.watchersFile == filepath.Join(blockingFile, "watchers.json") {
-		t.Fatalf("watchersFile did not move away from unwritable primary path")
+		t.Fatalf("saveWatchers returned error after fallback path resolution: %v", err)
 	}
 	if _, err := os.Stat(bot.watchersFile); err != nil {
-		t.Fatalf("fallback watchers file was not written: %v", err)
+		t.Fatalf("watchers file was not written: %v", err)
 	}
 }
