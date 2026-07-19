@@ -140,6 +140,8 @@ func (bot *TelegramBot) handleUpdate(ctx context.Context, update TelegramUpdate)
 		bot.unwatch(ctx, message.Chat.ID, args)
 	case "/list":
 		bot.listWatchers(ctx, message.Chat.ID)
+	case "/storage":
+		bot.sendMessage(ctx, message.Chat.ID, "Файл хранения проверок: "+bot.watchersFile)
 	default:
 		bot.sendMessage(ctx, message.Chat.ID, "Неизвестная команда. Используйте /help.")
 	}
@@ -418,6 +420,13 @@ func defaultWatchersPath() string {
 }
 
 func resolveWatchersPath() (string, error) {
+	if watchersFile := os.Getenv("WATCHERS_FILE"); watchersFile != "" {
+		if err := ensureWritableWatcherPath(watchersFile); err == nil {
+			return watchersFile, nil
+		} else {
+			log.Printf("WATCHERS_FILE is not writable %s: %v", watchersFile, err)
+		}
+	}
 	candidates := watcherPathCandidates()
 	for _, path := range candidates {
 		if _, err := os.Stat(path); err == nil {
@@ -440,9 +449,10 @@ func resolveWatchersPath() (string, error) {
 
 func watcherPathCandidates() []string {
 	paths := []string{}
-	if watchersFile := os.Getenv("WATCHERS_FILE"); watchersFile != "" {
-		paths = append(paths, watchersFile)
+	if stateDirectory := os.Getenv("STATE_DIRECTORY"); stateDirectory != "" {
+		paths = append(paths, filepath.Join(stateDirectory, "watchers.json"))
 	}
+	paths = append(paths, filepath.Join("/var/lib", "go-ssl-check", "watchers.json"))
 	if configPath := defaultConfigWatchersPath(); configPath != "" {
 		paths = append(paths, configPath)
 	}
@@ -534,5 +544,6 @@ func helpText() string {
 		"/check <url|host[:port]> — разовая проверка\n" +
 		"/watch <url|host[:port]> [минуты] — проверять по таймеру\n" +
 		"/list — список активных проверок\n" +
+		"/storage — показать файл хранения проверок\n" +
 		"/unwatch <url|host[:port]> — удалить таймер"
 }
