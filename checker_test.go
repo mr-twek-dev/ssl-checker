@@ -134,6 +134,7 @@ func TestFormatRevocationStatus(t *testing.T) {
 }
 
 func TestDefaultWatchersPathUsesEnvironmentOverride(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("WATCHERS_FILE", "/tmp/custom-watchers.json")
 	if got := defaultWatchersPath(); got != "/tmp/custom-watchers.json" {
 		t.Fatalf("defaultWatchersPath() = %q", got)
@@ -141,6 +142,7 @@ func TestDefaultWatchersPathUsesEnvironmentOverride(t *testing.T) {
 }
 
 func TestDefaultWatchersPathDoesNotUseProjectDataDirectory(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("WATCHERS_FILE", "")
 	got := defaultWatchersPath()
 	if strings.Contains(got, ".data/watchers.json") {
@@ -152,6 +154,7 @@ func TestDefaultWatchersPathDoesNotUseProjectDataDirectory(t *testing.T) {
 }
 
 func TestDefaultWatchersPathFallsBackWhenEnvironmentPathIsNotWritable(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("TMPDIR", t.TempDir())
 	blockingFile := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blockingFile, []byte("block"), 0o600); err != nil {

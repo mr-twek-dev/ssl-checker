@@ -418,7 +418,7 @@ func watcherPathCandidates() []string {
 	if configPath := defaultConfigWatchersPath(); configPath != "" {
 		paths = append(paths, configPath)
 	}
-	paths = append(paths, fallbackWatchersPath())
+	paths = append(paths, fallbackWatchersPath(), legacyTempWatchersPath())
 
 	seen := make(map[string]struct{}, len(paths))
 	unique := make([]string, 0, len(paths))
@@ -461,6 +461,10 @@ func defaultConfigWatchersPath() string {
 }
 
 func fallbackWatchersPath() string {
+	return filepath.Join("/var/tmp", "go-ssl-check", "watchers.json")
+}
+
+func legacyTempWatchersPath() string {
 	return filepath.Join(os.TempDir(), "ssl-checker", "watchers.json")
 }
 
